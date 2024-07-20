@@ -1,11 +1,42 @@
 // SPDX-License-Identifier: UNLICENSED
-pragma solidity ^0.8.24;
+pragma solidity ^0.8.20;
 
-import "../lib/openzeppelin/contracts/access/Ownable.sol";
-import "../lib/openzeppelin/contracts/token/ERC20/IERC20.sol";
+// import "../lib/openzeppelin/contracts/access/Ownable.sol";
+// import "../lib/openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+// import "../lib/openzeppelin/contracts/token/ERC20/IERC20.sol";
+// import "../lib/openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+// import "../lib/openzeppelin/contracts/utils/Address.sol";
+// import "../lib/openzeppelin/contracts/utils/math/Math.sol";
+
+// import "../lib/openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+// import "../lib/openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+// import "../lib/openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
+// import "../lib/openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 
 
-contract B2Stake is Ownable {
+
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/utils/Address.sol";
+import "@openzeppelin/contracts/utils/math/Math.sol";
+
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
+
+contract B2Stake is 
+    Initializable,
+    UUPSUpgradeable,
+    PausableUpgradeable,
+    AccessControlUpgradeable {
+
+    bytes32 public constant ADMIN_ROLE = keccak256("admin_role");
+    bytes32 public constant UPGRADE_ROLE = keccak256("upgrade_role");
+
+    uint256 public constant BTC_PID = 0;
+
     // 数据结构
     struct Pool {
         address stTokenAddress;
@@ -34,10 +65,22 @@ contract B2Stake is Ownable {
     mapping(uint256 => Pool) public pools;
     mapping(address => mapping(uint256 => User)) public users;
     mapping(address => bool) public authorizedUpgraders;
-    bool public paused = false;
-    address public b2TokenAddress; // 奖励代币的地址
+ 
+
+    uint256 public startBlock;
+    uint256 public endBlock;
+
+    uint256 public b2PerBlock;
+    bool public claimPaused;
+
+    // B2 token
+    IERC20 public B2;
 
     // 事件
+    event SetB2(IERC20 indexed B2);
+    event SetStartBlock(uint256 startBlock);
+    event SetEndBlock(uint256 endBlock);
+    event SetB2PerBlock(uint256 b2PerBlock);
     event Staked(address indexed user, uint256 pid, uint256 amount);
     event Unstaked(address indexed user, uint256 pid, uint256 amount);
     event RewardClaimed(address indexed user, uint256 pid, uint256 amount);
@@ -48,13 +91,74 @@ contract B2Stake is Ownable {
     event Paused();
     event Unpaused();
 
-    constructor(address _b2TokenAddress) Ownable(_b2TokenAddress) {
-        b2TokenAddress = _b2TokenAddress;
+
+    modifier whenNotClaimPaused() {
+        require(!claimPaused, "claim is paused");
+        _;
     }
 
-    modifier whenNotPaused() {
-        require(!paused, "Contract is paused");
-        _;
+    function initialize(
+        IERC20 _B2,
+        uint256 _startBlock,
+        uint256 _endBlock,
+        uint256 _b2PerBlock
+    ) public initializer {
+        require(_startBlock <= _endBlock && _b2PerBlock > 0, "invalid parameters");
+
+        __AccessControl_init();
+        __UUPSUpgradeable_init();
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        _grantRole(UPGRADE_ROLE, msg.sender);
+        _grantRole(ADMIN_ROLE, msg.sender);
+
+        setB2(_B2);
+
+        startBlock = _startBlock;
+        endBlock = _endBlock;
+        b2PerBlock = _b2PerBlock;
+    }
+
+    function _authorizeUpgrade(address newImplementation)
+        internal
+        onlyRole(UPGRADE_ROLE)
+        override
+    {
+
+    }
+
+    function setB2(IERC20 _B2) public onlyRole(ADMIN_ROLE) {
+        B2 = _B2;
+
+        emit SetB2(B2);
+    }
+    function setStartBlock(uint256 _startBlock) public onlyRole(ADMIN_ROLE) {
+        require(_startBlock <= endBlock, "start block must be smaller than end block");
+
+        startBlock = _startBlock;
+
+        emit SetStartBlock(_startBlock);
+    }
+
+    /**
+     * @notice Update staking end block. Can only be called by admin.
+     */
+    function setEndBlock(uint256 _endBlock) public onlyRole(ADMIN_ROLE) {
+        require(startBlock <= _endBlock, "start block must be smaller than end block");
+
+        endBlock = _endBlock;
+
+        emit SetEndBlock(_endBlock);
+    }
+
+    /**
+     * @notice Update the B2 reward amount per block. Can only be called by admin.
+     */
+    function setB2PerBlock(uint256 _b2PerBlock) public onlyRole(ADMIN_ROLE) {
+        require(_b2PerBlock > 0, "invalid parameter");
+
+        b2PerBlock = _b2PerBlock;
+
+        emit SetB2PerBlock(_b2PerBlock);
     }
 
     // 添加质押池
@@ -72,9 +176,11 @@ contract B2Stake is Ownable {
         pool.minDepositAmount = _minDepositAmount;
         pool.unstakeLockedBlocks = _unstakeLockedBlocks;
         pool.rewardPerBlock = _rewardPerBlock;
+            
 
         if (pool.lastRewardBlock == 0) {
-            pool.lastRewardBlock = block.number;
+            uint256 lastRewardBlock = block.number > startBlock ? block.number : startBlock;
+            pool.lastRewardBlock = lastRewardBlock;
             emit PoolAdded(_pid, _stTokenAddress, _poolWeight, _minDepositAmount, _unstakeLockedBlocks, _rewardPerBlock);
         } else {
             emit PoolUpdated(_pid, _stTokenAddress, _poolWeight, _minDepositAmount, _unstakeLockedBlocks, _rewardPerBlock);
@@ -124,38 +230,26 @@ contract B2Stake is Ownable {
         require(reward > 0, "No reward to claim");
 
         user.pendingB2 = 0;
-        IERC20(b2TokenAddress).transfer(msg.sender, reward);
+        B2.transfer(msg.sender, reward);
 
         emit RewardClaimed(msg.sender, _pid, reward);
     }
 
     // 授权升级者
-    function authorizeUpgrader(address _upgrader) external onlyOwner {
+    function authorizeUpgrader(address _upgrader) external onlyRole(ADMIN_ROLE) {
         authorizedUpgraders[_upgrader] = true;
         emit UpgraderAuthorized(_upgrader);
     }
 
-    // 撤销升级者权限
-    function revokeUpgrader(address _upgrader) external onlyOwner {
-        authorizedUpgraders[_upgrader] = false;
-        emit UpgraderRevoked(_upgrader);
-    }
-
-    // 升级合约（示例，实际实现可能不同）
-    function upgradeContract(address newContract) external {
-        require(authorizedUpgraders[msg.sender], "Not authorized to upgrade");
-        // Implementation of contract upgrade logic
-    }
-
     // 暂停合约
-    function pause() external onlyOwner {
-        paused = true;
+    function pause() external onlyRole(ADMIN_ROLE) {
+        claimPaused = true;
         emit Paused();
     }
 
     // 恢复合约
-    function unpause() external onlyOwner {
-        paused = false;
+    function unpause() external onlyRole(ADMIN_ROLE) {
+        claimPaused = false;
         emit Unpaused();
     }
 

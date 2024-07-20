@@ -3,7 +3,7 @@ pragma solidity ^0.8.24;
 
 import {Test, console} from "../lib/forge-std/src/Test.sol";
 import {B2Stake} from "../src/B2Stake.sol";
-import {IERC20} from "../lib/openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 contract MockERC20 is IERC20 {
     // Mock implementation for testing
