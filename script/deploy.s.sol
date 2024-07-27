@@ -7,7 +7,7 @@ contract Deploy {
     address public deployedAddress;
 
     function deploy() public {
-        B2Stake b2Stake = new B2Stake(msg.sender);
+        B2Stake b2Stake = new B2Stake();
         deployedAddress = address(b2Stake);
     }
 }

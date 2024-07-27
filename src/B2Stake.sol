@@ -46,7 +46,6 @@ contract B2Stake is
         uint256 stTokenAmount;
         uint256 minDepositAmount;
         uint256 unstakeLockedBlocks;
-        uint256 rewardPerBlock; // 每个区块的奖励
     }
 
     struct User {
@@ -174,9 +173,7 @@ contract B2Stake is
         pool.stTokenAddress = _stTokenAddress;
         pool.poolWeight = _poolWeight;
         pool.minDepositAmount = _minDepositAmount;
-        pool.unstakeLockedBlocks = _unstakeLockedBlocks;
-        pool.rewardPerBlock = _rewardPerBlock;
-            
+        pool.unstakeLockedBlocks = _unstakeLockedBlocks;            
 
         if (pool.lastRewardBlock == 0) {
             uint256 lastRewardBlock = block.number > startBlock ? block.number : startBlock;
@@ -216,12 +213,40 @@ contract B2Stake is
             unlockBlock: unlockBlock
         }));
 
+        IERC20(pool.stTokenAddress).transfer(msg.sender, _amount);
         user.stAmount -= _amount;
         pool.stTokenAmount -= _amount;
+
+        uint256 pendingB2_ = user.stAmount * pool.accB2PerST / (1 ether) - user.finishedB2;
+
+        if(pendingB2_ > 0) {
+            user.pendingB2 = user.pendingB2 + pendingB2_;
+        }
+
+        pool.stTokenAmount = pool.stTokenAmount - _amount;
+        user.finishedB2 = user.stAmount * pool.accB2PerST / (1 ether);
 
         emit Unstaked(msg.sender, _pid, _amount);
     }
 
+    // 解除质押
+    function withdraw(uint256 _pid) external whenNotPaused {
+        Pool storage pool = pools[_pid];
+        User storage user = users[msg.sender][_pid];
+
+        require(user.requests.length > 0, "No unstake request");
+
+        for(uint256 i = 0; i < user.requests.length; i++) {
+            if(user.requests[i].unlockBlock <= block.number) {
+                IERC20(pool.stTokenAddress).transfer(msg.sender, user.requests[i].amount);
+                user.stAmount -= user.requests[i].amount;
+                pool.stTokenAmount -= user.requests[i].amount;
+                user.requests[i] = user.requests[user.requests.length - 1];
+                user.requests.pop();
+            }
+        }
+
+    }
     // 领取奖励
     function claimReward(uint256 _pid) external whenNotPaused {
         User storage user = users[msg.sender][_pid];
@@ -230,6 +255,7 @@ contract B2Stake is
         require(reward > 0, "No reward to claim");
 
         user.pendingB2 = 0;
+        user.finishedB2 += reward;
         B2.transfer(msg.sender, reward);
 
         emit RewardClaimed(msg.sender, _pid, reward);
@@ -261,13 +287,6 @@ contract B2Stake is
             return;
         }
 
-        uint256 multiplier = rewardBlock - pool.lastRewardBlock;
-
-        if (pool.stTokenAmount > 0) {
-            uint256 totalReward = multiplier * pool.rewardPerBlock * pool.poolWeight / pool.stTokenAmount;
-            pool.accB2PerST += totalReward;
-        }
-
         pool.lastRewardBlock = rewardBlock;
     }
 
@@ -281,14 +300,12 @@ contract B2Stake is
         if (rewardBlock <= pool.lastRewardBlock) {
             return 0;
         }
-        uint256 multiplier = rewardBlock - pool.lastRewardBlock;
-
-        // 计算总奖励
-        uint256 totalReward = multiplier * pool.rewardPerBlock * pool.poolWeight / pool.stTokenAmount;
-
+       
+        uint256 totalReward = user.stAmount * pool.accB2PerST / (1 ether);
+        
         // 计算用户的奖励
-        uint256 userReward = user.stAmount * totalReward / pool.stTokenAmount;
-
+        uint256 userReward = totalReward - user.finishedB2;
+       
         return userReward;
     }
 }
